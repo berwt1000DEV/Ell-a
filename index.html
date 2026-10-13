@@ -3,18 +3,19 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Ell a — IndexedDB Örneği</title>
+  <title>Ell a — Supabase + IndexedDB</title>
   <style>
-    body { font-family: Arial, sans-serif; max-width: 700px; margin: 2rem auto; padding: 0 1rem; }
+    body { font-family: Arial, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
     label, input, button { display: block; margin: .4rem 0; }
     ul { padding-left: 1.2rem; }
     .row { display:flex; gap:8px; align-items:center; }
     .item-actions { margin-left: auto; }
+    .source { font-size: .9rem; color: #666; }
   </style>
 </head>
 <body>
-  <h1>Ell a — Veri Ekle (IndexedDB)</h1>
-  <p>Bu sayfa tarayıcı içi IndexedDB kullanarak veri ekleyip listeleyen basit bir örnektir.</p>
+  <h1>Ell a — Veri Kaydet (Supabase + IndexedDB)</h1>
+  <p>Bu sayfa: eğer Supabase bilgileri sağlanmışsa verileri Supabase'e yazar, değilse IndexedDB'yi kullanır. Supabase sağlandığında aynı zamanda lokal IndexedDB'ye de yazıp offline cache sağlar.</p>
 
   <form id="itemForm">
     <label>Başlık: <input id="title" required /></label>
@@ -23,17 +24,37 @@
   </form>
 
   <h2>Kaydedilenler</h2>
+  <p class="source" id="sourceLabel">Kaynak: <span id="source">(henüz belirlenmedi)</span></p>
   <ul id="itemsList"></ul>
-  <button id="clearBtn">Tümünü Sil</button>
+  <button id="clearBtn">Tümünü Sil (Hem local hem remote için)</button>
+
+  <!-- Supabase JS (UMD) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js/dist/umd/supabase.min.js"></script>
 
   <script>
-    // DB ayarları
+    // --- Ayarlar ---
     const DB_NAME = 'EllADb';
     const DB_VERSION = 1;
     const STORE_NAME = 'items';
     let db;
 
-    // DB'yi aç
+    // --- SUPABASE KONFIGURASYONU ---
+    // Aşağıdaki iki değişkeni Vercel üzerinde ya da doğrudan buraya koyabilirsiniz.
+    // Not: Eğer buraya anahtar koymak istemiyorsanız, Vercel tarafında build ile bu dosyayı
+    // bir şablon aracılığıyla (ör. Next.js veya build script) doldurabilirsiniz.
+    const SUPABASE_URL = 'SUPABASE_URL_HERE';
+    const SUPABASE_ANON_KEY = 'SUPABASE_ANON_KEY_HERE';
+
+    const useSupabase = SUPABASE_URL && SUPABASE_URL !== 'SUPABASE_URL_HERE' && SUPABASE_ANON_KEY && SUPABASE_ANON_KEY !== 'SUPABASE_ANON_KEY_HERE';
+    let supabase = null;
+    if (useSupabase) {
+      supabase = supabaseJs.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      document.getElementById('source').textContent = 'Supabase (remote) + IndexedDB (cache)';
+    } else {
+      document.getElementById('source').textContent = 'IndexedDB (local)';
+    }
+
+    // --- IndexedDB yardımcıları ---
     function openDb() {
       return new Promise((resolve, reject) => {
         const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -49,8 +70,7 @@
       });
     }
 
-    // Veri ekle
-    function addItem(item) {
+    function idbAddItem(item) {
       return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, 'readwrite');
         const store = tx.objectStore(STORE_NAME);
@@ -60,8 +80,7 @@
       });
     }
 
-    // Tüm verileri al
-    function getAllItems() {
+    function idbGetAllItems() {
       return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, 'readonly');
         const store = tx.objectStore(STORE_NAME);
@@ -71,19 +90,7 @@
       });
     }
 
-    // Tek bir öğeyi sil
-    function deleteItem(id) {
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_NAME, 'readwrite');
-        const store = tx.objectStore(STORE_NAME);
-        const req = store.delete(Number(id));
-        req.onsuccess = () => resolve();
-        req.onerror = () => reject(req.error);
-      });
-    }
-
-    // Tüm öğeleri temizle
-    function clearAll() {
+    function idbClearAll() {
       return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, 'readwrite');
         const store = tx.objectStore(STORE_NAME);
@@ -93,15 +100,37 @@
       });
     }
 
+    // --- Supabase yardımcıları ---
+    async function supabaseAddItem(item) {
+      const { data, error } = await supabase.from('items').insert([{ title: item.title, description: item.desc, created_at: item.createdAt }]).select();
+      if (error) throw error;
+      return data && data[0];
+    }
+
+    async function supabaseGetAllItems() {
+      const { data, error } = await supabase.from('items').select('*').order('created_at', { ascending: false });
+      if (error) throw error;
+      return data;
+    }
+
+    async function supabaseClearAll() {
+      // WARNING: bulk delete - ensure you really want this
+      const { error } = await supabase.from('items').delete().neq('id', 0);
+      if (error) throw error;
+    }
+
+    // --- UI rendering ---
     function renderItems(items) {
       const ul = document.getElementById('itemsList');
       ul.innerHTML = '';
-      items.sort((a,b) => (new Date(b.createdAt)) - (new Date(a.createdAt)));
       items.forEach(it => {
         const li = document.createElement('li');
         li.className = 'row';
         const text = document.createElement('span');
-        text.textContent = `${it.id}: ${it.title || '(başlıksız)'} — ${it.desc || ''}`;
+        const title = it.title || it.name || '(başlıksız)';
+        const desc = it.description || it.desc || it.desciption || '';
+        const id = it.id || '—';
+        text.textContent = `${id}: ${title} — ${desc}`;
         li.appendChild(text);
 
         const actions = document.createElement('div');
@@ -109,7 +138,22 @@
         const del = document.createElement('button');
         del.textContent = 'Sil';
         del.addEventListener('click', async () => {
-          await deleteItem(it.id);
+          // local delete and remote delete (best-effort)
+          if (it.id && useSupabase) {
+            try {
+              await supabase.from('items').delete().eq('id', it.id);
+            } catch (e) { console.warn('remote delete failed', e); }
+          }
+          if (it.id) {
+            try {
+              await (async () => {
+                const tx = db.transaction(STORE_NAME, 'readwrite');
+                const store = tx.objectStore(STORE_NAME);
+                store.delete(Number(it.id));
+                return tx.complete;
+              })();
+            } catch(e) {}
+          }
           refreshList();
         });
         actions.appendChild(del);
@@ -120,36 +164,78 @@
     }
 
     async function refreshList() {
-      const items = await getAllItems();
-      renderItems(items);
+      try {
+        if (useSupabase) {
+          const remote = await supabaseGetAllItems();
+          renderItems(remote.map(r => ({ id: r.id, title: r.title, description: r.description })));
+        } else {
+          const items = await idbGetAllItems();
+          renderItems(items);
+        }
+      } catch (err) {
+        console.error('refreshList hata:', err);
+        // fallback to local
+        const items = await idbGetAllItems();
+        renderItems(items);
+      }
     }
 
+    // --- Form işlemleri ---
     document.getElementById('itemForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const title = document.getElementById('title').value.trim();
       const desc = document.getElementById('desc').value.trim();
-      await addItem({ title, desc, createdAt: new Date().toISOString() });
+      const item = { title, desc, createdAt: new Date().toISOString() };
+
+      // Her zaman local'e yaz (cache)
+      try {
+        await idbAddItem(item);
+      } catch (e) {
+        console.warn('idb add hata', e);
+      }
+
+      // Eğer supabase açıksa remote'a da yaz
+      if (useSupabase) {
+        try {
+          await supabaseAddItem(item);
+        } catch (err) {
+          console.error('Supabase yazma hatası, local cache var:', err);
+        }
+      }
+
       document.getElementById('title').value = '';
       document.getElementById('desc').value = '';
       await refreshList();
     });
 
     document.getElementById('clearBtn').addEventListener('click', async () => {
-      if (!confirm('Tüm verileri silmek istediğinize emin misiniz?')) return;
-      await clearAll();
-      await refreshList();
+      if (!confirm('Tüm verileri silmek istediğinize emin misiniz? (Hem local hem remote için)')) return;
+      try {
+        await idbClearAll();
+        if (useSupabase) {
+          await supabaseClearAll();
+        }
+        await refreshList();
+      } catch (err) {
+        console.error('clear hata', err);
+        alert('Silme sırasında hata: ' + err.message);
+      }
     });
 
-    // Başlat
+    // --- Başlatma ve otomatik senkronizasyon basit hali ---
     (async () => {
       try {
         await openDb();
+
+        // Eğer Supabase açıksa, önce remote'ı getir ve görüntüle.
+        // (Basit senkronizasyon: remote varsa onu gösteriyoruz. Local cache de tutulur.)
         await refreshList();
+
       } catch (err) {
-        console.error('IndexedDB açılırken hata:', err);
+        console.error('Başlatma hatası:', err);
         const p = document.createElement('p');
         p.style.color = 'red';
-        p.textContent = 'IndexedDB kullanılırken hata oluştu. Tarayıcınız desteklemiyor olabilir.';
+        p.textContent = 'IndexedDB açılırken hata oluştu. Tarayıcınız desteklemiyor olabilir.';
         document.body.appendChild(p);
       }
     })();
